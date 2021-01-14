@@ -717,7 +717,13 @@ void utp_socket_impl::update_mtu_limits()
 {
 	INVARIANT_CHECK;
 
-	if (m_mtu_floor > m_mtu_ceiling) m_mtu_floor = m_mtu_ceiling;
+	if (m_mtu_floor > m_mtu_ceiling)
+	{
+		// the path MTU may have changed. Perform another search
+		m_mtu_floor = TORRENT_INET_MIN_MTU - TORRENT_IPV4_HEADER - TORRENT_UDP_HEADER;
+
+		UTP_LOGV("%8p: resetting MTU floor\n", static_cast<void*>(this));
+	}
 
 	m_mtu = (m_mtu_floor + m_mtu_ceiling) / 2;
 
@@ -2031,7 +2037,6 @@ bool utp_socket_impl::send_pkt(int const flags)
 		// since we'd have to repacketize
 		TORRENT_ASSERT(p->mtu_probe);
 		m_mtu_ceiling = p->size - 1;
-		if (m_mtu_floor > m_mtu_ceiling) m_mtu_floor = m_mtu_ceiling;
 		update_mtu_limits();
 		// resend the packet immediately without
 		// it being an MTU probe
