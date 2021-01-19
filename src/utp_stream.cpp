@@ -720,9 +720,10 @@ void utp_socket_impl::update_mtu_limits()
 	if (m_mtu_floor > m_mtu_ceiling)
 	{
 		// the path MTU may have changed. Perform another search
-		m_mtu_floor = TORRENT_INET_MIN_MTU - TORRENT_IPV4_HEADER - TORRENT_UDP_HEADER;
+		// dont' start all the way from start, just half way down.
+		m_mtu_floor = ((TORRENT_INET_MIN_MTU - TORRENT_IPV4_HEADER - TORRENT_UDP_HEADER) + m_mtu_ceiling) / 2;
 
-		UTP_LOGV("%8p: resetting MTU floor\n", static_cast<void*>(this));
+		UTP_LOGV("%8p: reducing MTU floor\n", static_cast<void*>(this));
 	}
 
 	m_mtu = (m_mtu_floor + m_mtu_ceiling) / 2;
