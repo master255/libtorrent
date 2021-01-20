@@ -52,6 +52,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/flags.hpp"
 #include "libtorrent/error_code.hpp"
 #include "libtorrent/units.hpp"
+#include "libtorrent/disk_interface.hpp" // for default_block_size
 #include "libtorrent/fwd.hpp"
 
 namespace libtorrent {
@@ -229,7 +230,11 @@ namespace aux {
 		file_storage& operator=(file_storage&&) &;
 
 		// internal limitations restrict file sizes to not be larger than this
-		static constexpr std::int64_t max_file_size = (std::int64_t(1) << 48) - 1;
+		// We use int to index blocks in files, so a file may not contain more
+		// than INT_MAX blocks (each block is 16 kiB).
+		static constexpr std::int64_t max_file_size = std::min(
+			(std::int64_t(1) << 48) - 1
+			, std::int64_t(std::numeric_limits<int>::max()) * default_block_size);
 		static constexpr std::int64_t max_file_offset = (std::int64_t(1) << 48) - 1;
 
 		// returns true if the piece length has been initialized
