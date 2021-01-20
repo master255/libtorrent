@@ -1941,7 +1941,9 @@ bool utp_socket_impl::send_pkt(int const flags)
 			return false;
 		}
 
+#if TORRENT_USE_ASSERTS
 		payload_size = p->size - p->header_size;
+#endif
 	}
 
 	if (sack)
