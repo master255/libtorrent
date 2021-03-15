@@ -638,6 +638,9 @@ bool is_downloading_state(int const st)
 		{
 			inc_stats_counter(counters::non_filter_torrents);
 		}
+
+		set_need_save_resume();
+
 		m_apply_ip_filter = b;
 		ip_filter_updated();
 		state_updated();
@@ -889,11 +892,23 @@ bool is_downloading_state(int const st)
 		if (mask & torrent_flags::stop_when_ready)
 			stop_when_ready(bool(flags & torrent_flags::stop_when_ready));
 		if (mask & torrent_flags::disable_dht)
-			m_enable_dht = !bool(flags & torrent_flags::disable_dht);
+		{
+			bool const new_value = !bool(flags & torrent_flags::disable_dht);
+			if (m_enable_dht != new_value) set_need_save_resume();
+			m_enable_dht = new_value;
+		}
 		if (mask & torrent_flags::disable_lsd)
-			m_enable_lsd = !bool(flags & torrent_flags::disable_lsd);
+		{
+			bool const new_value = !bool(flags & torrent_flags::disable_lsd);
+			if (m_enable_lsd != new_value) set_need_save_resume();
+			m_enable_lsd = new_value;
+		}
 		if (mask & torrent_flags::disable_pex)
-			m_enable_pex = !bool(flags & torrent_flags::disable_pex);
+		{
+			bool const new_value = !bool(flags & torrent_flags::disable_pex);
+			if (m_enable_pex != new_value) set_need_save_resume();
+			m_enable_pex = new_value;
+		}
 	}
 
 #ifndef TORRENT_DISABLE_SHARE_MODE
@@ -902,6 +917,7 @@ bool is_downloading_state(int const st)
 		if (s == m_share_mode) return;
 
 		m_share_mode = s;
+		set_need_save_resume();
 #ifndef TORRENT_DISABLE_LOGGING
 		debug_log("*** set-share-mode: %d", s);
 #endif
@@ -926,6 +942,7 @@ bool is_downloading_state(int const st)
 		debug_log("*** set-upload-mode: %d", b);
 #endif
 
+		set_need_save_resume();
 		update_gauge();
 		state_updated();
 		send_upload_only();
@@ -4826,6 +4843,8 @@ namespace {
 				alerts().emplace_alert<file_renamed_alert>(get_handle()
 					, filename, m_torrent_file->files().file_path(file_idx), file_idx);
 			m_torrent_file->rename_file(file_idx, filename);
+
+			set_need_save_resume();
 		}
 	}
 	catch (...) { handle_exception(); }
@@ -5695,6 +5714,7 @@ namespace {
 		k->trackerid = url.trackerid;
 		k->tier = url.tier;
 		k->fail_limit = url.fail_limit;
+		set_need_save_resume();
 		if (m_announcing && !m_trackers.empty()) announce_with_tracker();
 		return true;
 	}
@@ -8561,8 +8581,18 @@ namespace {
 			if (p.is_connecting() && p.peer_info_struct()->seed)
 				++num_connecting_seeds;
 
-			if (p.peer_info_struct() && p.peer_info_struct()->seed)
-				++seeds;
+			if (p.peer_info_struct())
+			{
+				if (p.peer_info_struct()->seed)
+				{
+					++seeds;
+					TORRENT_ASSERT(!p.m_bitfield_received || p.is_seed());
+				}
+				else
+				{
+					TORRENT_ASSERT(!p.is_seed());
+				}
+			}
 
 			for (auto const& j : p.request_queue())
 			{
@@ -10881,18 +10911,16 @@ namespace {
 
 	void torrent::set_seed(torrent_peer* p, bool const s)
 	{
-		if (p->seed != s)
+		if (p->seed == s) return;
+		if (s)
 		{
-			if (s)
-			{
-				TORRENT_ASSERT(m_num_seeds < 0xffff);
-				++m_num_seeds;
-			}
-			else
-			{
-				TORRENT_ASSERT(m_num_seeds > 0);
-				--m_num_seeds;
-			}
+			TORRENT_ASSERT(m_num_seeds < 0xffff);
+			++m_num_seeds;
+		}
+		else
+		{
+			TORRENT_ASSERT(m_num_seeds > 0);
+			--m_num_seeds;
 		}
 
 		need_peer_list();

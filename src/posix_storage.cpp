@@ -48,6 +48,16 @@ POSSIBILITY OF SUCH DAMAGE.
 
 using namespace libtorrent::flags; // for flag operators
 
+#ifndef TORRENT_WINDOWS
+// make sure the _FILE_OFFSET_BITS define worked
+// on this platform. It's supposed to make file
+// related functions support 64-bit offsets.
+#if TORRENT_HAS_FTELLO
+static_assert(sizeof(ftello(nullptr)) >= 8, "64 bit file operations are required");
+#endif
+static_assert(sizeof(off_t) >= 8, "64 bit file operations are required");
+#endif
+
 namespace libtorrent {
 namespace aux {
 
@@ -127,7 +137,14 @@ namespace aux {
 				// so we just don't use a partfile for this file
 
 				std::string const fp = fs.file_path(i, m_save_path);
-				if (exists(fp)) use_partfile(i, false);
+				if (exists(fp, ec.ec)) use_partfile(i, false);
+				if (ec.ec)
+				{
+					ec.file(i);
+					ec.operation = operation_t::file_stat;
+					prio = m_file_priority;
+					return;
+				}
 			}
 			ec.ec.clear();
 			m_file_priority[i] = new_prio;
@@ -500,12 +517,7 @@ namespace aux {
 					// it's not a problem, we won't access empty files ever again
 					ec.ec.clear();
 					file_pointer f = open_file(file_index, aux::open_mode::write, 0, ec);
-					if (ec)
-					{
-						ec.file(file_index);
-						ec.operation = operation_t::file_fallocate;
-						return;
-					}
+					if (ec) return;
 				}
 			}
 			ec.ec.clear();
@@ -576,13 +588,9 @@ namespace aux {
 			}
 		}
 
-#ifdef _MSC_VER
-#define fseeko _fseeki64
-#endif
-
 		if (offset != 0)
 		{
-			if (fseeko(f, offset, SEEK_SET) != 0)
+			if (portable_fseeko(f, offset, SEEK_SET) != 0)
 			{
 				ec.ec.assign(errno, generic_category());
 				ec.file(idx);
@@ -609,4 +617,3 @@ namespace aux {
 
 }
 }
-

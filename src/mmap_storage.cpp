@@ -165,7 +165,14 @@ namespace libtorrent {
 				// so we just don't use a partfile for this file
 
 				std::string const fp = fs.file_path(i, m_save_path);
-				if (exists(fp)) use_partfile(i, false);
+				if (exists(fp, ec.ec)) use_partfile(i, false);
+				if (ec.ec)
+				{
+					ec.file(i);
+					ec.operation = operation_t::file_stat;
+					prio = m_file_priority;
+					return;
+				}
 /*
 				auto f = open_file(sett, i, aux::open_mode::read_only, ec);
 				if (ec.ec != boost::system::errc::no_such_file_or_directory)
@@ -353,12 +360,7 @@ namespace libtorrent {
 					ec.ec.clear();
 					auto f = open_file(sett, file_index, aux::open_mode::write
 						| aux::open_mode::random_access | aux::open_mode::truncate, ec);
-					if (ec)
-					{
-						ec.file(file_index);
-						ec.operation = operation_t::file_fallocate;
-						return;
-					}
+					if (ec) return;
 				}
 			}
 			ec.ec.clear();
@@ -814,7 +816,7 @@ namespace libtorrent {
 		}
 #endif
 
-		boost::optional<aux::file_view> h = open_file_impl(sett, file, mode, ec.ec);
+		boost::optional<aux::file_view> h = open_file_impl(sett, file, mode, ec);
 		if ((mode & aux::open_mode::write)
 			&& ec.ec == boost::system::errc::no_such_file_or_directory)
 		{
@@ -833,7 +835,7 @@ namespace libtorrent {
 				return {};
 			}
 
-			h = open_file_impl(sett, file, mode, ec.ec);
+			h = open_file_impl(sett, file, mode, ec);
 		}
 		if (ec.ec)
 		{
@@ -859,7 +861,7 @@ namespace libtorrent {
 	boost::optional<aux::file_view> mmap_storage::open_file_impl(settings_interface const& sett
 		, file_index_t file
 		, aux::open_mode_t mode
-		, error_code& ec) const
+		, storage_error& ec) const
 	{
 		TORRENT_ASSERT(!files().pad_file_at(file));
 		if (!m_allocate_files) mode |= aux::open_mode::sparse;
@@ -889,9 +891,10 @@ namespace libtorrent {
 #endif
 				);
 		}
-		catch (system_error const& ex)
+		catch (storage_error const& se)
 		{
-			ec = ex.code();
+			ec = se;
+			ec.file(file);
 			TORRENT_ASSERT(ec);
 			return {};
 		}

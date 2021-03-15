@@ -44,6 +44,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/aux_/vector.hpp"
 #include "libtorrent/aux_/path.hpp" // for combine_path etc.
 #include "libtorrent/fwd.hpp"
+#include "libtorrent/aux_/throw.hpp"
 
 #include <vector>
 #include <string>
@@ -167,6 +168,13 @@ namespace libtorrent {
 		// generate(). Setting v2 hashes (with set_hash2()) is an error with
 		// this flag set.
 		static constexpr create_flags_t v1_only = 6_bit;
+
+		// This flag only affects v1-only torrents, and is only relevant
+		// together with the v1_only_flag. This flag will force the
+		// same file order and padding as a v2 (or hybrid) torrent would have.
+		// It has the effect of ordering files and inserting pad files to align
+		// them with piece boundaries.
+		static constexpr create_flags_t canonical_files = 7_bit;
 
 		// The ``piece_size`` is the size of each piece in bytes. It must be a
 		// power of 2 and a minimum of 16 kiB. If a piece size of 0 is
@@ -475,14 +483,14 @@ namespace aux {
 	{
 		error_code ec;
 		set_piece_hashes(t, p, aux::nop, ec);
-		if (ec) throw system_error(ec);
+		if (ec) aux::throw_ex<system_error>(ec);
 	}
 	inline void set_piece_hashes(create_torrent& t, std::string const& p
 		, std::function<void(piece_index_t)> const& f)
 	{
 		error_code ec;
 		set_piece_hashes(t, p, f, ec);
-		if (ec) throw system_error(ec);
+		if (ec) aux::throw_ex<system_error>(ec);
 	}
 	inline void set_piece_hashes(create_torrent& t, std::string const& p
 		, settings_interface const& settings
@@ -490,7 +498,7 @@ namespace aux {
 	{
 		error_code ec;
 		set_piece_hashes(t, p, settings, f, ec);
-		if (ec) throw system_error(ec);
+		if (ec) aux::throw_ex<system_error>(ec);
 	}
 #endif
 
