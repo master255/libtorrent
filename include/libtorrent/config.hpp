@@ -17,11 +17,11 @@ see LICENSE file.
 #ifndef TORRENT_CONFIG_HPP_INCLUDED
 #define TORRENT_CONFIG_HPP_INCLUDED
 
-#include <cstddef>
-
 #include "libtorrent/aux_/disable_warnings_push.hpp"
 
 #define _FILE_OFFSET_BITS 64
+
+#include <cstddef>
 
 #include <boost/config.hpp>
 #include <boost/version.hpp>
@@ -144,7 +144,20 @@ see LICENSE file.
 // ===== ANDROID ===== (almost linux, sort of)
 #if defined __ANDROID__
 #define TORRENT_ANDROID
+#if __ANDROID_API__ < 21
 #define TORRENT_HAS_FALLOCATE 0
+#define TORRENT_HAS_FADVISE 0
+#endif // API < 21
+
+// android 32 bits has real problems with fseeko
+#if (__ANDROID_API__ < 24) || defined __arm__ || defined __i386__
+#define TORRENT_HAS_FSEEKO 0
+#endif
+
+#if __ANDROID_API__ < 24
+#define TORRENT_HAS_FTELLO 0
+#endif // API < 24
+
 #else // ANDROID
 
 // posix_fallocate() is not available in glibc under these condition
@@ -359,6 +372,18 @@ see LICENSE file.
 
 #ifndef TORRENT_HAS_FALLOCATE
 #define TORRENT_HAS_FALLOCATE 1
+#endif
+
+#ifndef TORRENT_HAS_FADVISE
+#define TORRENT_HAS_FADVISE 1
+#endif
+
+#ifndef TORRENT_HAS_FSEEKO
+#define TORRENT_HAS_FSEEKO 1
+#endif
+
+#ifndef TORRENT_HAS_FTELLO
+#define TORRENT_HAS_FTELLO 1
 #endif
 
 #ifndef TORRENT_USE_COMMONCRYPTO

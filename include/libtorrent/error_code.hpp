@@ -329,7 +329,6 @@ namespace errors {
 		deprecated_124,
 #endif
 
-
 		// The resume data file is missing the ``file sizes`` entry
 		missing_file_sizes = 130,
 		// The resume data file ``file sizes`` entry is empty
@@ -433,6 +432,10 @@ namespace errors {
 
 		// random number generation failed
 		no_entropy = 200,
+		// blocked by SSRF mitigation
+		ssrf_mitigation,
+		// blocked because IDNA host names are banned
+		blocked_by_idna,
 
 		// the torrent file has an unknown meta version
 		torrent_unknown_version = 210,
@@ -521,6 +524,8 @@ namespace errors {
 		// hidden
 		storage_error(): file_idx(-1), operation(operation_t::unknown) {}
 		explicit storage_error(error_code e): ec(e), file_idx(-1), operation(operation_t::unknown) {}
+		storage_error(error_code e, operation_t const op)
+			: ec(e), file_idx(-1), operation(op) {}
 
 		// explicitly converts to true if this object represents an error, and
 		// false if it does not.

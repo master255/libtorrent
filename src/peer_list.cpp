@@ -423,6 +423,11 @@ namespace libtorrent::aux {
 			|| int(p.failcount) >= m_max_failcount)
 			return false;
 
+#if TORRENT_USE_RTC
+		// unsolicited connections over RTC  is not possible
+		if (p.is_rtc_addr) return false;
+#endif
+
 		return true;
 	}
 
@@ -1007,6 +1012,9 @@ namespace libtorrent::aux {
 			if (!p->is_rtc_addr)
 				return nullptr; // prefer the non-rtc peer
 
+			if (p->connection)
+				return nullptr; // the peer is already connected
+
 			// update and return it
 			p->port = remote.port();
 			return p;
@@ -1135,13 +1143,19 @@ namespace libtorrent::aux {
 		m_candidate_cache.erase(m_candidate_cache.begin());
 
 		TORRENT_ASSERT(p->in_use);
-
 		TORRENT_ASSERT(!p->banned);
 		TORRENT_ASSERT(!p->connection);
 		TORRENT_ASSERT(p->connectable);
+#if TORRENT_USE_RTC
+		TORRENT_ASSERT(!p->is_rtc_addr);
+#endif
 
 		// this should hold because find_connect_candidates should have done this
 		TORRENT_ASSERT(bool(m_finished) == state->is_finished);
+
+		// if we're finished, p->seed must be 0. We shouldn't be connecting to
+		// seeds in that case
+		TORRENT_ASSERT(m_finished == 0 || p->seed == 0);
 
 		TORRENT_ASSERT(is_connect_candidate(*p));
 		return p;

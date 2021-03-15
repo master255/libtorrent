@@ -10,7 +10,9 @@ import package ;
 import virtual-target ;
 import cast ;
 
-VERSION = 2.0 ;
+# we need version numbers in the form X.Y.Z in order to trigger the built-in
+# support for generating symlinks to the installed library
+VERSION = 2.0.0 ;
 
 BOOST_ROOT = [ modules.peek : BOOST_ROOT ] ;
 ECHO "OS =" [ os.name ] ;
@@ -161,6 +163,7 @@ rule linking ( properties * )
 		# for backtraces in assertion failures
 		# which only works on ELF targets with gcc
 		result += <linkflags>-Wl,-export-dynamic <linkflags>-rdynamic ;
+		result += <local-visibility>global ;
 	}
 
 	local BOOST_VERSION_TAG = [ modules.peek boostcpp : BOOST_VERSION_TAG ] ;
@@ -333,7 +336,7 @@ rule building ( properties * )
 		result += <build>no ;
 	}
 
-	if <toolset>msvc in $(properties)
+	if <toolset>msvc in $(properties) || <toolset>intel-win in $(properties)
 	{
 		# allow larger .obj files (with more sections)
 		result += <cflags>/bigobj ;
@@ -356,40 +359,37 @@ rule building ( properties * )
 		result += <source>src/pe_crypto.cpp ;
 	}
 
-	if ( <toolset>darwin in $(properties)
-		|| <toolset>gcc in $(properties)
-		|| <toolset>clang in $(properties)
-		|| <toolset>clang-darwin in $(properties) )
-		# on GCC, enabling debugging in libstdc++
-		# breaks the ABI and its ability to appear
-		# in shared object interfaces, so when it's
-		# enabled, just export everything (since we're)
-		# probably not a production build anyway
-		&& ! <debug-iterators>on in $(properties)
-	{
-		# hide non-external symbols
-		result += <cflags>-fvisibility=hidden ;
-		result += <cxxflags>-fvisibility-inlines-hidden ;
-
-		if ( <toolset>gcc in $(properties) )
-		{
-			result += <linkflags>-Wl,-Bsymbolic ;
-		}
-	}
-
 	return $(result) ;
 }
 
 rule tag ( name : type ? : property-set )
 {
-	if $(type) = SHARED_LIB &&
-		( ! ( [ $(property-set).get <target-os> ] in windows cygwin ) )
+	# we only care about the names of our output static- or shared library, not
+	# other targets like object files
+	if $(type) != SHARED_LIB && $(type) != STATIC_LIB
+	{
+		return [ virtual-target.add-prefix-and-suffix $(name) : $(type) : $(property-set) ] ;
+	}
+
+	# static libraries are not versioned
+	if $(type) = STATIC_LIB
+	{
+		return [ virtual-target.add-prefix-and-suffix $(name)-rasterbar : $(type) : $(property-set) ] ;
+	}
+
+	# shared libraries have the version number before the filename extension on
+	# windows
+	if [ $(property-set).get <target-os> ] in windows cygwin
+	{
+		# TODO: add version on windows too
+		# return [ virtual-target.add-prefix-and-suffix $(name)-rasterbar-$(VERSION) : $(type) : $(property-set) ] ;
+		return [ virtual-target.add-prefix-and-suffix $(name)-rasterbar : $(type) : $(property-set) ] ;
+	}
+	else
 	{
 		local name = [ virtual-target.add-prefix-and-suffix $(name)-rasterbar : $(type) : $(property-set) ] ;
 		return $(name).$(VERSION) ;
 	}
-
-	return [ virtual-target.add-prefix-and-suffix $(name) : $(type) : $(property-set) ] ;
 }
 
 # the search path to pick up the openssl libraries from. This is the <search>
@@ -937,6 +937,7 @@ lib torrent
 	: # default build
 	<threading>multi
 	<c++-template-depth>512
+	<local-visibility>hidden
 
 	: # usage requirements
 	$(usage-requirements)
@@ -944,6 +945,128 @@ lib torrent
 
 	;
 
+
+# install rules
+
+rule generate-pkg-config ( properties * )
+{
+	import property-set ;
+	import project ;
+	import version ;
+
+	local l = [ project.target [ project.module-name "." ] ] ;
+
+	# this is the libtorrent library target
+	local t = [ $(l).find torrent : . ] ;
+
+	# these are the properties we're using to build it with
+	local props = [ $(t).generate [ property-set.create $(properties) ] ] ;
+	local libname = [ $(props[2]).name ] ;
+	props = $(props[1]) ;
+
+	local FULL_VERSION = 2.0.2 ;
+	local libdir ;
+	local includes ;
+
+	# package.paths was introduced in boost-1.70 (2018.02)
+	# however, boost build's versioning scheme changed in boost-1.71 to version
+	# 4.0
+	local boost-build-version = [ SPLIT_BY_CHARACTERS [ version.boost-build ] : "-" ] ;
+	if [ version.version-less [ SPLIT_BY_CHARACTERS $(boost-build-version[1]) : "." ] : 2018 03 ]
+	{
+		import option ;
+		import property ;
+		local prefix = [ option.get prefix : [ property.select <install-default-prefix> : $(properties) ] ] ;
+		prefix = $(prefix:G=) ;
+		# Or some likely defaults if neither is given.
+		if ! $(prefix)
+		{
+			if [ modules.peek : NT ] { prefix = C:\\$(package-name) ; }
+			else if [ modules.peek : UNIX ] { prefix = /usr/local ; }
+		}
+
+		libdir += $(prefix)/lib ;
+		includes = $(prefix)/include ;
+	}
+	else
+	{
+		local p = [ package.paths libtorrent : $(properties) ] ;
+		libdir += [ $(p).libdir ] ;
+		includes = [ $(p).includedir ] ;
+	}
+
+	local defines ;
+	local shared_deps ;
+	local private_deps ;
+	for d in [ feature.expand $(properties) ] [ $(props).raw ] {
+		switch $(d)
+		{
+			case \<define\>TORRENT_* : {
+				d = [ SPLIT_BY_CHARACTERS $(d) : ">" ] ;
+				defines += $(d[2]) ;
+			}
+			case \<define\>BOOST_* : {
+				d = [ SPLIT_BY_CHARACTERS $(d) : ">" ] ;
+				defines += $(d[2]) ;
+			}
+			case \<include\>* : {
+				d = [ SPLIT_BY_CHARACTERS $(d) : ">" ] ;
+				d = $(d[2]) ;
+				if ( [ path.is-rooted $(d) ] )
+				{
+					includes += $(d) ;
+				}
+			}
+			case \<library\>* : {
+				d = [ SPLIT_BY_CHARACTERS $(d) : ">" ] ;
+				# this is the target
+				local t = $(d[2]) ;
+				if [ $(t).type ] = SHARED_LIB
+				{
+					local path = [ $(t).path ] ;
+					if $(path) != ""
+					{
+						libdir += $(path) ;
+					}
+					shared_deps += [ $(t).name ] ;
+				}
+				else if [ $(t).type ] = SEARCHED_LIB
+				{
+					local path = [ $(t).search ] ;
+					if $(path) != ""
+					{
+						libdir += $(path) ;
+					}
+					shared_deps += [ $(t).name ] ;
+				}
+				else if ( [ $(t).type ] = STATIC_LIB )
+				{
+					private_deps += [ $(t).name ] ;
+				}
+			}
+		}
+	}
+
+	# TODO: use $(libname) in future versions
+	local config = "Name: libtorrent-rasterbar"
+		"\nDescription: libtorrent is an open source C++ library implementing the BitTorrent protocol"
+		"\nURL: https://libtorrent.org"
+		"\nVersion: $(FULL_VERSION)"
+		"\nLibs:"
+		" -L\"$(libdir)\""
+		" -ltorrent-rasterbar"
+		" -l$(shared_deps)"
+		"\nLibs.private:"
+		" -L\"$(libdir)\""
+		" -l$(private_deps)"
+		"\nCflags:"
+		" -D$(defines)"
+		" -I\"$(includes)\""
+		"\n"
+		;
+
+	local dummy = @("libtorrent-rasterbar.pc":E=$(config)) ;
+}
 headers = [ path.glob-tree include/libtorrent : *.hpp ] ;
 
 package.install install-torrent-lib
@@ -958,9 +1081,18 @@ package.install-data install-cmake-module
 	: examples/cmake/FindLibtorrentRasterbar.cmake
 	;
 
-alias install : install-torrent-lib install-cmake-module ;
+package.install-data install-pkg-config
+	: pkgconfig
+	: libtorrent-rasterbar.pc
+	: <conditional>@generate-pkg-config
+	;
+
+alias install : install-torrent-lib install-cmake-module install-pkg-config ;
 
 explicit install ;
+
+
+# testing headers targets
 
 local header_targets ;
 for local target in $(headers)

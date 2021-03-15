@@ -451,6 +451,7 @@ HEADERS = \
   io_context.hpp               \
   io_service.hpp               \
   ip_filter.hpp                \
+  libtorrent.hpp               \
   magnet_uri.hpp               \
   mmap_disk_io.hpp             \
   natpmp.hpp                   \
@@ -869,7 +870,6 @@ TEST_SOURCES = \
   test_peer_classes.cpp \
   test_peer_list.cpp \
   test_peer_priority.cpp \
-  test_pex.cpp \
   test_piece_picker.cpp \
   test_primitives.cpp \
   test_priority.cpp \

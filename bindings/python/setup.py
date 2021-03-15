@@ -1,33 +1,35 @@
 #!/usr/bin/env python3
 
+import contextlib
 from distutils import log
+import distutils.cmd
 import distutils.debug
+import distutils.errors
 import distutils.sysconfig
+import functools
 import os
 import pathlib
+import re
+import shlex
+import subprocess
 import sys
 import sysconfig
 import tempfile
-import subprocess
+from typing import Callable
+from typing import cast
+from typing import IO
+from typing import Iterator
+from typing import List
+from typing import Optional
+from typing import Sequence
+from typing import Set
+import warnings
 
 import setuptools
-import setuptools.command.build_ext as _build_ext_lib
+import setuptools.command.build_ext as build_ext_lib
 
 
-def get_msvc_toolset():
-    # Reference: https://wiki.python.org/moin/WindowsCompilers
-    major_minor = sys.version_info[0:2]
-    if major_minor in ((2, 6), (2, 7), (3, 0), (3, 1), (3, 2)):
-        return "msvc-9.0"
-    if major_minor in ((3, 3), (3, 4)):
-        return "msvc-10.0"
-    if major_minor in ((3, 5), (3, 6)):
-        return "msvc-14.1"  # libtorrent requires VS 2017 or newer
-    # unknown python version
-    return "msvc"
-
-
-def b2_bool(value):
+def b2_bool(value: bool) -> str:
     if value:
         return "on"
     return "off"
@@ -49,30 +51,37 @@ def b2_bool(value):
 
 
 class B2Distribution(setuptools.Distribution):
-    def reinitialize_command(self, command, reinit_subcommands=0):
+    def reinitialize_command(
+        self, command: str, reinit_subcommands: int = 0
+    ) -> distutils.cmd.Command:
         if command == "build_ext":
-            return self.get_command_obj("build_ext")
-        return super().reinitialize_command(
-            command, reinit_subcommands=reinit_subcommands
+            return cast(distutils.cmd.Command, self.get_command_obj("build_ext"))
+        return cast(
+            distutils.cmd.Command,
+            super().reinitialize_command(
+                command, reinit_subcommands=reinit_subcommands
+            ),
         )
 
 
 # Various setuptools logic expects us to provide Extension instances for each
 # extension in the distro.
 class StubExtension(setuptools.Extension):
-    def __init__(self, name):
+    def __init__(self, name: str):
         # An empty sources list ensures the base build_ext command won't build
         # anything
         super().__init__(name, sources=[])
 
 
-def b2_escape(value):
+def b2_escape(value: str) -> str:
     value = value.replace("\\", "\\\\")
     value = value.replace('"', '\\"')
     return f'"{value}"'
 
 
-def write_b2_python_config(config):
+def write_b2_python_config(
+    include_dirs: Sequence[str], library_dirs: Sequence[str], config: IO[str]
+) -> None:
     write = config.write
     # b2 keys python environments by X.Y version, breaking ties by matching
     # a property list, called the "condition" of the environment. To ensure
@@ -87,19 +96,28 @@ def write_b2_python_config(config):
     write("import feature ;\n")
     write("feature.feature libtorrent-python : on ;\n")
 
-    # python.jam tries to determine correct include and library paths. Per
-    # https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=691378 , include
-    # detection is broken, but debian's fix is also broken (invokes a global
-    # pythonX.Y instead of the passed interpreter)
-    paths = sysconfig.get_paths()
-    includes = [paths["include"], paths["platinclude"]]
+    # python.jam's autodetection of library paths and include paths has various
+    # bugs, and has very poor support of non-system python environments,
+    # such as pyenv or virtualenvs. distutils' autodetection is much more
+    # robust, and we trust it more. In case distutils gives empty results,
+    # feed garbage values to boost to block its autodetection.
 
     write("using python")
     write(f" : {sysconfig.get_python_version()}")
     write(f" : {b2_escape(sys.executable)}")
     write(" : ")
-    write(" ".join(b2_escape(path) for path in includes))
-    write(" :")  # libraries
+    if include_dirs:
+        write(" ".join(b2_escape(path) for path in include_dirs))
+    else:
+        write("__BLOCK_AUTODETECTION__")
+    write(" : ")
+    if library_dirs:
+        # Note that python.jam only accepts one library dir! We depend on
+        # passing other library dirs by other means. Not sure if we should
+        # do something smarter here, like pass the first directory that exists.
+        write(b2_escape(library_dirs[0]))
+    else:
+        write("__BLOCK_AUTODETECTION__")
     write(" : <libtorrent-python>on")
 
     # Note that all else being equal, we'd like to exactly control the output
@@ -118,6 +136,7 @@ def write_b2_python_config(config):
     # Note that sysconfig and distutils.sysconfig disagree here, especially on
     # windows.
     ext_suffix = distutils.sysconfig.get_config_var("EXT_SUFFIX")
+    ext_suffix = str(ext_suffix or "")
 
     # python.jam appends the platform-specific final suffix on its own. I can't
     # find a consistent value from sysconfig or distutils.sysconfig for this.
@@ -129,93 +148,239 @@ def write_b2_python_config(config):
     write(" ;\n")
 
 
-BuildExtBase = _build_ext_lib.build_ext
+class LibtorrentBuildExt(build_ext_lib.build_ext):
 
+    CONFIG_MODE_DISTUTILS = "distutils"
+    CONFIG_MODE_B2 = "b2"
+    CONFIG_MODES = (CONFIG_MODE_DISTUTILS, CONFIG_MODE_B2)
 
-class LibtorrentBuildExt(BuildExtBase):
-
-    user_options = BuildExtBase.user_options + [
+    user_options = build_ext_lib.build_ext.user_options + [
+        (
+            "config-mode=",
+            None,
+            "'b2' or 'distutils' (default). "
+            "In b2 mode, setup.py will just invoke b2 using --b2-args. "
+            "It will not attempt to auto-configure b2 or override any "
+            "args. "
+            "In distutils mode, setup.py will attempt to configure "
+            "and invoke b2 to match the expectations and behavior of "
+            "distutils (libtorrent will be built against the invoking "
+            "python, etc; note not all behaviors are currently supported). "
+            "The feature set will match the version found on pypi. "
+            "You can selectively override the auto-configuration in "
+            "this mode with --no-autoconf or --b2-args. For example "
+            "--b2-args=python=x.y or --no-autoconf=python will prevent "
+            "python from being auto-configured. "
+            "Note that --b2-args doesn't currently understand implicit features. "
+            "Be sure to include their names, e.g. --b2-args=variant=debug",
+        ),
+        (
+            "b2-args=",
+            None,
+            "The full argument string to pass to b2. This is parsed with shlex, to "
+            "support arguments with spaces. For example: --b2-args 'variant=debug "
+            '"my-feature=a value with spaces"\'',
+        ),
+        (
+            "no-autoconf=",
+            None,
+            "Space-separated list of b2 arguments that should not be "
+            "auto-configured in distutils mode.",
+        ),
         (
             "libtorrent-link=",
             None,
-            "how to link to libtorrent ('static', 'shared' or 'prebuilt')",
+            "(DEPRECATED; use --b2-args=libtorrent-link=...) ",
+        ),
+        ("boost-link=", None, "(DEPRECATED; use --b2-args=boost-link=...) "),
+        ("toolset=", None, "(DEPRECATED; use --b2-args=toolset=...) b2 toolset"),
+        (
+            "pic",
+            None,
+            "(DEPRECATED; use --b2-args=libtorrent-python-pic=on) "
+            "whether to compile with -fPIC",
         ),
         (
-            "boost-link=",
+            "optimization=",
             None,
-            "how to link to boost-python ('static' or 'shared')",
+            "(DEPRECATED; use --b2-args=optimization=...) " "b2 optimization mode",
         ),
-        ("toolset=", None, "b2 toolset"),
-        ("pic", None, "whether to compile with -fPIC"),
-        ("optimization=", None, "b2 optimization mode"),
         (
             "hash",
             None,
+            "(DEPRECATED; use --b2-args=--hash) "
             "use a property hash for the build directory, rather than "
             "property subdirectories",
         ),
-        ("cxxstd=", None, "boost cxxstd value (14, 17, 20, etc.)"),
+        (
+            "cxxstd=",
+            None,
+            "(DEPRECATED; use --b2-args=cxxstd=...) "
+            "boost cxxstd value (14, 17, 20, etc.)",
+        ),
     ]
 
-    boolean_options = BuildExtBase.boolean_options + ["pic", "hash"]
+    boolean_options = build_ext_lib.build_ext.boolean_options + ["pic", "hash"]
 
-    def initialize_options(self):
+    def initialize_options(self) -> None:
+        self.libtorrent_link: Optional[str] = None
+        self.boost_link: Optional[str] = None
+        self.toolset: Optional[str] = None
+        self.pic: Optional[bool] = None
+        self.optimization: Optional[str] = None
+        self.hash: Optional[bool] = None
+        self.cxxstd: Optional[str] = None
 
-        if os.name == "nt":
-            self.libtorrent_link = "static"
+        self.config_mode = self.CONFIG_MODE_DISTUTILS
+        self.b2_args = ""
+        self.no_autoconf = ""
+
+        self._b2_args_split: List[str] = []
+        self._b2_args_configured: Set[str] = set()
+
+        super().initialize_options()
+
+    def finalize_options(self) -> None:
+        super().finalize_options()
+
+        if self.config_mode not in self.CONFIG_MODES:
+            raise distutils.errors.DistutilsOptionError(
+                f"--config-mode must be one of {self.CONFIG_MODES}"
+            )
+
+        # shlex the args here to warn early on bad config
+        self._b2_args_split = shlex.split(self.b2_args or "")
+        self._b2_args_configured.update(shlex.split(self.no_autoconf or ""))
+
+        # In b2's arg system only single-character args can consume the next
+        # arg, but it may also be concatenated. So we may have "-x",
+        # "-x value", or "-xvalue". All --long args which take a value must
+        # appear as "--long=value"
+        i = 0
+        while i < len(self._b2_args_split):
+            arg = self._b2_args_split[i]
+            m = re.match(r"(-[dfjlmopst])(.*)", arg)
+            if m:
+                name = m.group(1)
+                # An arg that takes a value but wasn't concatenated. Treat the
+                # next option as the value
+                if not m.group(2):
+                    i += 1
+            else:
+                name = arg.split("=", 1)[0]
+            self._b2_args_configured.add(name)
+            i += 1
+
+        # Add deprecated args
+        if self.libtorrent_link:
+            warnings.warn(
+                "--libtorrent-link is deprecated; use --b2-args=libtorrent-link=..."
+            )
+            self._maybe_add_arg(f"libtorrent-link={self.libtorrent_link}")
+            self._b2_args_configured.add("libtorrent-link")
+        if self.boost_link:
+            warnings.warn("--boost-link is deprecated; use --b2-args=boost-link=...")
+            self._maybe_add_arg(f"boost-link={self.boost_link}")
+            self._b2_args_configured.add("boost-link")
+        if self.toolset:
+            warnings.warn("--toolset is deprecated; use --b2-args=toolset=...")
+            self._maybe_add_arg(f"toolset={self.toolset}")
+            self._b2_args_configured.add("toolset")
+        if self.pic:
+            warnings.warn("--pic is deprecated; use --b2-args=libtorrent-python-pic=on")
+            self._maybe_add_arg("libtorrent-python-pic=on")
+            self._b2_args_configured.add("libtorrent-python-pic")
+        if self.optimization:
+            warnings.warn(
+                "--optimization is deprecated; use --b2-args=optimization=..."
+            )
+            self._maybe_add_arg(f"optimization={self.optimization}")
+            self._b2_args_configured.add("optimization")
+        if self.hash:
+            warnings.warn("--hash is deprecated; use --b2-args=--hash")
+            self._maybe_add_arg("--hash")
+        if self.cxxstd:
+            warnings.warn("--cxxstd is deprecated; use --b2-args=cxxstd=...")
+            self._maybe_add_arg(f"cxxstd={self.cxxstd}")
+
+    def _should_add_arg(self, arg: str) -> bool:
+        m = re.match(r"(-\w).*", arg)
+        if m:
+            name = m.group(1)
         else:
-            self.libtorrent_link = None
+            name = arg.split("=", 1)[0]
+        return name not in self._b2_args_configured
 
-        self.boost_link = None
-        self.toolset = None
-        self.pic = None
-        self.optimization = None
-        self.hash = None
-        self.cxxstd = None
-        return super().initialize_options()
+    def _maybe_add_arg(self, arg: str) -> bool:
+        if self._should_add_arg(arg):
+            self._b2_args_split.append(arg)
+            return True
+        return False
 
-    def run(self):
+    def run(self) -> None:
         # The current jamfile layout just supports one extension
-        self.build_extension_with_b2()
-        return super().run()
+        self._build_extension_with_b2()
+        super().run()
 
-    def build_extension_with_b2(self):
-        args = []
+    def _build_extension_with_b2(self) -> None:
+        python_binding_dir = pathlib.Path(__file__).parent.absolute()
+        with self._configure_b2():
+            command = ["b2"] + self._b2_args_split
+            log.info(" ".join(command))
+            subprocess.run(command, cwd=python_binding_dir, check=True)
 
+    @contextlib.contextmanager
+    def _configure_b2(self) -> Iterator[None]:
+        if self.config_mode == self.CONFIG_MODE_DISTUTILS:
+            # If we're using distutils mode, we'll auto-configure a lot of args
+            # and write temporary config.
+            yield from self._configure_b2_with_distutils()
+        else:
+            # If we're using b2 mode, no configuration needed
+            yield
+
+    def _configure_b2_with_distutils(self) -> Iterator[None]:
         if os.name == "nt":
-            self.toolset = get_msvc_toolset()
-            self.boost_link = "static"
-            args.append('--abbreviate-paths')
+            self._maybe_add_arg("--abbreviate-paths")
 
         if distutils.debug.DEBUG:
-            args.append("--debug-configuration")
-            args.append("--debug-building")
-            args.append("--debug-generators")
+            self._maybe_add_arg("--debug-configuration")
+            self._maybe_add_arg("--debug-building")
+            self._maybe_add_arg("--debug-generators")
+
+        # Default feature configuration
+        self._maybe_add_arg("deprecated-functions=on")
+        self._maybe_add_arg("boost-link=static")
+        self._maybe_add_arg("libtorrent-link=static")
 
         variant = "debug" if self.debug else "release"
-        args.append(variant)
+        self._maybe_add_arg(f"variant={variant}")
         bits = 64 if sys.maxsize > 2 ** 32 else 32
-        args.append(f"address-model={bits}")
+        self._maybe_add_arg(f"address-model={bits}")
 
         if self.parallel:
-            args.append(f"-j{self.parallel}")
-        if self.libtorrent_link:
-            args.append(f"libtorrent-link={self.libtorrent_link}")
-        if self.boost_link:
-            args.append(f"boost-link={self.boost_link}")
-        if self.pic:
-            args.append(f"libtorrent-python-pic={b2_bool(self.pic)}")
-        if self.optimization:
-            args.append(f"optimization={self.optimization}")
-        if self.hash:
-            args.append("--hash")
-        if self.cxxstd:
-            args.append(f"cxxstd={self.cxxstd}")
+            self._maybe_add_arg(f"-j{self.parallel}")
 
-        # Jamfile hacks to ensure we select the python environment defined in
-        # our project-config.jam
-        args.append("libtorrent-python=on")
-        args.append(f"python={sysconfig.get_python_version()}")
+        # We use a "project-config.jam" to instantiate a python environment
+        # to exactly match the running one.
+        config_writers: List[Callable[[IO[str]], None]] = []
+        if self._should_add_arg("--project-config"):
+            if self._maybe_add_arg(f"python={sysconfig.get_python_version()}"):
+                config_writers.append(
+                    functools.partial(
+                        write_b2_python_config, self.include_dirs, self.library_dirs
+                    )
+                )
+
+                # Jamfile hacks to ensure we select the python environment defined in
+                # our project-config.jam
+                self._maybe_add_arg("libtorrent-python=on")
+
+                # python.jam only allows ONE library dir! distutils may autodetect
+                # multiple, and finding the "right" one isn't straightforward. We just
+                # pass them all here and hopefully the right thing happens.
+                for path in self.library_dirs:
+                    self._b2_args_split.append(f"library-path={b2_escape(path)}")
 
         # Our goal is to produce an artifact at this path. If we do this, the
         # distutils build system will skip trying to build it.
@@ -228,28 +393,29 @@ class LibtorrentBuildExt(BuildExtBase):
         # write_b2_python_config for limitations on controlling the filename.
 
         # Jamfile hack to copy the module to our target directory
-        args.append(f"python-install-path={target.parent}")
-        args.append("install_module")
+        self._maybe_add_arg(f"python-install-path={target.parent}")
+        self._maybe_add_arg("install_module")
 
-        # We use a "project-config.jam" to instantiate a python environment
-        # to exactly match the running one.
-        python_binding_dir = pathlib.Path(__file__).parent.absolute()
-        config = tempfile.NamedTemporaryFile(mode="w+", delete=False)
-        try:
-            write_b2_python_config(config)
-            config.seek(0)
-            log.info("project-config.jam contents:")
-            log.info(config.read())
-            config.close()
-            args.append(f"--project-config={config.name}")
-
-            log.info(" ".join(["b2"] + args))
-            subprocess.run(["b2"] + args, cwd=python_binding_dir, check=True)
-        finally:
-            # If we errored while writing config, windows may complain about
-            # unlinking a file "in use"
-            config.close()
-            os.unlink(config.name)
+        # Two paths depending on whether or not we use a generated
+        # project-config.jam or not.
+        if config_writers:
+            config = tempfile.NamedTemporaryFile(mode="w+", delete=False)
+            try:
+                for writer in config_writers:
+                    writer(config)
+                config.seek(0)
+                log.info("project-config.jam contents:")
+                log.info(config.read())
+                config.close()
+                self._b2_args_split.append(f"--project-config={config.name}")
+                yield
+            finally:
+                # If we errored while writing config, windows may complain about
+                # unlinking a file "in use"
+                config.close()
+                os.unlink(config.name)
+        else:
+            yield
 
 
 setuptools.setup(

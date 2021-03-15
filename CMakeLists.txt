@@ -51,6 +51,7 @@ set(libtorrent_include_files
 	index_range
 	io_service
 	ip_filter
+	libtorrent
 	magnet_uri
 	mmap_disk_io
 	natpmp
@@ -776,6 +777,7 @@ endif()
 
 if (webtorrent)
 	option(NO_WEBSOCKET "Disable WebSocket support in libdatachannel" ON)
+	option(NO_MEDIA "Disable media transport support in libdatachannel" ON)
 	if(GNUTLS_FOUND)
 		option(USE_GNUTLS "Use GnuTLS instead of OpenSSL for libdatachannel" ON)
 	else()
@@ -788,10 +790,6 @@ if (webtorrent)
 			-Wno-unused-parameter
 			-Wno-unused-variable
 			-Wno-format-nonliteral)
-	endif()
-	if(CMAKE_CXX_COMPILER_ID MATCHES GNU)
-		target_compile_options(usrsctp-static PRIVATE
-			-Wno-format-truncation)
 	endif()
 endif()
 

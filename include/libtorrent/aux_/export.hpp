@@ -17,12 +17,26 @@ see LICENSE file.
 
 #include "libtorrent/aux_/deprecated.hpp"
 
+// TORRENT_ABI_VERSION numbers
+// 1: libtorrent-1.1
+// 2: libtorrent-1.2
+// 3: libtorrent-2.0
+// 4: libtorrent-2.1
+
 #if !defined TORRENT_ABI_VERSION
 # ifdef TORRENT_NO_DEPRECATE
 #  define TORRENT_ABI_VERSION 4
 # else
 #  define TORRENT_ABI_VERSION 1
 # endif
+#endif
+
+#if TORRENT_ABI_VERSION >= 4
+# define TORRENT_VERSION_NAMESPACE_4 inline namespace v2_1 {
+# define TORRENT_VERSION_NAMESPACE_4_END  }
+#else
+# define TORRENT_VERSION_NAMESPACE_4
+# define TORRENT_VERSION_NAMESPACE_4_END
 #endif
 
 #if TORRENT_ABI_VERSION >= 3
@@ -66,7 +80,7 @@ see LICENSE file.
 # if defined _MSC_VER || defined __MINGW32__
 #  define BOOST_SYMBOL_EXPORT __declspec(dllexport)
 #  define BOOST_SYMBOL_IMPORT __declspec(dllimport)
-# elif __GNU__ >= 4
+# elif __GNUC__ >= 4
 #  define BOOST_SYMBOL_EXPORT __attribute__((visibility("default")))
 #  define BOOST_SYMBOL_IMPORT __attribute__((visibility("default")))
 # else
@@ -76,7 +90,7 @@ see LICENSE file.
 #endif
 
 #if !defined TORRENT_EXPORT_EXTRA \
-  && ((defined __GNU__ && __GNU__ >= 4) || defined __clang__)
+  && ((defined __GNUC__ && __GNUC__ >= 4) || defined __clang__)
 # define TORRENT_UNEXPORT __attribute__((visibility("hidden")))
 #else
 # define TORRENT_UNEXPORT

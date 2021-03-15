@@ -361,6 +361,16 @@ class TestAddPiece(unittest.TestCase):
 
 class test_torrent_info(unittest.TestCase):
 
+    def test_non_ascii_file(self):
+        try:
+            shutil.copy('base.torrent', 'base-\u745E\u5177.torrent')
+        except shutil.SameFileError:
+            pass
+        ti = lt.torrent_info('base-\u745E\u5177.torrent')
+
+        self.assertTrue(len(ti.info_section()) != 0)
+        self.assertTrue(len(ti.hash_for_piece(0)) != 0)
+
     def test_bencoded_constructor(self):
         info = lt.torrent_info({'info': {
             'name': 'test_torrent', 'length': 1234,
@@ -603,7 +613,7 @@ class test_peer_class(unittest.TestCase):
 class test_session(unittest.TestCase):
 
     def test_settings(self):
-        sett = { 'alert_mask': lt.alert.category_t.all_categories }
+        sett = {'alert_mask': lt.alert.category_t.all_categories}
         s = lt.session(sett)
         sett = s.get_settings()
         self.assertEqual(sett['alert_mask'] & 0x7fffffff, 0x7fffffff)
@@ -827,10 +837,19 @@ class test_peer_info(unittest.TestCase):
 
 if __name__ == '__main__':
     print(lt.__version__)
-    shutil.copy(os.path.join('..', '..', 'test', 'test_torrents',
-                             'url_seed_multi.torrent'), '.')
-    shutil.copy(os.path.join('..', '..', 'test', 'test_torrents',
-                             'base.torrent'), '.')
-    shutil.copy(os.path.join('..', '..', 'test', 'test_torrents',
-                             'unordered.torrent'), '.')
+    try:
+        shutil.copy(os.path.join('..', '..', 'test', 'test_torrents',
+                                 'url_seed_multi.torrent'), '.')
+    except shutil.SameFileError:
+        pass
+    try:
+        shutil.copy(os.path.join('..', '..', 'test', 'test_torrents',
+                                 'base.torrent'), '.')
+    except shutil.SameFileError:
+        pass
+    try:
+        shutil.copy(os.path.join('..', '..', 'test', 'test_torrents',
+                                 'unordered.torrent'), '.')
+    except shutil.SameFileError:
+        pass
     unittest.main()

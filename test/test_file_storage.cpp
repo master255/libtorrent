@@ -52,6 +52,7 @@ void setup_test_storage(file_storage& st)
 	TEST_EQUAL(st.file_offset(file_index_t{3}), 60000);
 
 	TEST_EQUAL(st.total_size(), 100000);
+	TEST_EQUAL(st.size_on_disk(), 100000);
 	TEST_EQUAL(st.piece_length(), 0x4000);
 	std::printf("%d\n", st.num_pieces());
 	TEST_EQUAL(st.num_pieces(), (100000 + 0x3fff) / 0x4000);
@@ -164,11 +165,17 @@ TORRENT_TEST(pointer_offset)
 	file_storage st;
 	st.set_piece_length(16 * 1024);
 	char const filename[] = "test1fooba";
+#if TORRENT_ABI_VERSION < 4
 	char const filehash[] = "01234567890123456789-----";
+#endif
 	char const roothash[] = "01234567890123456789012345678912-----";
 
 	st.add_file_borrow({filename, 5}, combine_path("test-torrent-1", "test1")
-		, 10, file_flags_t{}, filehash, 0, {}, roothash);
+		, 10, file_flags_t{}
+#if TORRENT_ABI_VERSION < 4
+		, filehash
+#endif
+		, 0, {}, roothash);
 
 	// test filename_ptr and filename_len
 #if TORRENT_ABI_VERSION <= 2
@@ -176,7 +183,9 @@ TORRENT_TEST(pointer_offset)
 	TEST_EQUAL(st.file_name_len(file_index_t{0}), 5);
 #endif
 	TEST_EQUAL(st.file_name(file_index_t{0}), string_view(filename, 5));
+#if TORRENT_ABI_VERSION < 4
 	TEST_EQUAL(st.hash(file_index_t{0}), sha1_hash(filehash));
+#endif
 	TEST_EQUAL(st.root(file_index_t{0}), sha256_hash(roothash));
 
 	TEST_EQUAL(st.file_path(file_index_t{0}, ""), combine_path("test-torrent-1", "test1"));
@@ -264,6 +273,7 @@ TORRENT_TEST(canonicalize_pad)
 	fs.add_file(combine_path("s", "2"), 0x7000);
 	fs.add_file(combine_path("s", "1"), 1);
 	fs.add_file(combine_path("s", "3"), 0x7001);
+	TEST_EQUAL(fs.size_on_disk(), 0x7000 + 1 + 0x7001);
 
 	fs.canonicalize();
 
@@ -286,6 +296,7 @@ TORRENT_TEST(canonicalize_pad)
 	TEST_EQUAL(fs.file_size(file_index_t(4)), 0x7001);
 	TEST_EQUAL(fs.file_name(file_index_t(4)), "3");
 	TEST_EQUAL(fs.pad_file_at(file_index_t(4)), false);
+	TEST_EQUAL(fs.size_on_disk(), 0x7000 + 1 + 0x7001);
 }
 
 // make sure canonicalize sorts by path correctly
@@ -740,31 +751,38 @@ TORRENT_TEST(files_equal_symlink)
 	TEST_CHECK(!lt::aux::files_equal(fs1, fs2));
 }
 
+std::int64_t const int_max = std::numeric_limits<int>::max();
+
 TORRENT_TEST(large_files)
 {
 	file_storage fs1;
 	fs1.set_piece_length(0x4000);
-	TEST_THROW(fs1.add_file("test/0", std::int64_t(1) << 48));
+	TEST_THROW(fs1.add_file("test/0", int_max / 2 * lt::default_block_size + 1));
 
 	error_code ec;
-	fs1.add_file(ec, "test/0", (std::int64_t(1) << 48));
+	fs1.add_file(ec, "test/0", int_max * lt::default_block_size + 1);
 	TEST_EQUAL(ec, make_error_code(boost::system::errc::file_too_large));
 
 	// should not throw
-	TEST_NOTHROW(fs1.add_file("test/1", (std::int64_t(1) << 48) - 1));
+	TEST_NOTHROW(fs1.add_file("test/0", int_max / 2 * lt::default_block_size));
 }
 
 TORRENT_TEST(large_offset)
 {
 	file_storage fs1;
 	fs1.set_piece_length(0x4000);
-	fs1.add_file("test/0", (std::int64_t(1) << 48) - 10);
-	// 11 bytes + (2^48 - 10) exceeds the limit
-	TEST_THROW(fs1.add_file("test/1", 11));
+	for (int i = 0; i < 16; ++i)
+		fs1.add_file(("test/" + std::to_string(i)).c_str(), int_max / 2 * lt::default_block_size);
+
+	// this exceeds the 2^48-1 limit
+	TEST_THROW(fs1.add_file("test/16", 262144));
 
 	error_code ec;
-	fs1.add_file(ec, "test/1", 11);
+	fs1.add_file(ec, "test/8", 262144);
 	TEST_EQUAL(ec, make_error_code(errors::torrent_invalid_length));
+
+	// this should be OK, but just
+	fs1.add_file("test/8", 262143);
 }
 
 TORRENT_TEST(large_filename)
@@ -1020,6 +1038,28 @@ TORRENT_TEST(file_index_for_root)
 	TEST_EQUAL(fs.file_index_for_root(sha256_hash("33333333333333333333333333333333")), file_index_t{2});
 	TEST_EQUAL(fs.file_index_for_root(sha256_hash("44444444444444444444444444444444")), file_index_t{3});
 	TEST_EQUAL(fs.file_index_for_root(sha256_hash("55555555555555555555555555555555")), file_index_t{-1});
+}
+
+TORRENT_TEST(size_on_disk)
+{
+	file_storage fs;
+	fs.set_piece_length(0x8000);
+
+	std::int64_t size_on_disk = 0;
+	TEST_EQUAL(fs.size_on_disk(), size_on_disk);
+	fs.add_file("test/0", 100, {}, 0, {}, "11111111111111111111111111111111");
+	size_on_disk += 100;
+	TEST_EQUAL(fs.size_on_disk(), size_on_disk);
+	fs.add_file("test/1", 800, {}, 0, {}, "22222222222222222222222222222222");
+	size_on_disk += 800;
+	TEST_EQUAL(fs.size_on_disk(), size_on_disk);
+	fs.add_file("test/2", 333, {}, 0, {}, "33333333333333333333333333333333");
+	size_on_disk += 333;
+	TEST_EQUAL(fs.size_on_disk(), size_on_disk);
+	fs.add_file("test/3", 1337, {}, 0, {}, "44444444444444444444444444444444");
+	size_on_disk += 1337;
+	TEST_EQUAL(fs.size_on_disk(), size_on_disk);
+	TEST_CHECK(fs.size_on_disk() < fs.total_size());
 }
 
 // TODO: test file attributes

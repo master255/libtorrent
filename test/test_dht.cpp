@@ -38,6 +38,7 @@ see LICENSE file.
 #include "libtorrent/kademlia/routing_table.hpp"
 #include "libtorrent/kademlia/item.hpp"
 #include "libtorrent/kademlia/dht_observer.hpp"
+#include "libtorrent/kademlia/dht_tracker.hpp"
 
 #include <numeric>
 #include <cstdarg>
@@ -2718,8 +2719,8 @@ TORRENT_TEST(dht_dual_stack)
 
 	// v6 node requesting both v4 and v6 nodes
 
-	send_dht_request(node6, "find_nodes", source, &response
-		, msg_args().info_hash("0101010101010101010101010101010101010101")
+	send_dht_request(node6, "find_node", source, &response
+		, msg_args().target(sha1_hash("0101010101010101010101010101010101010101"))
 			.want("n4")
 			.want("n6"));
 
@@ -4029,6 +4030,68 @@ TORRENT_TEST(all_in_same_bucket)
 		TEST_CHECK(all_in_same_bucket(b, to_hash("0005000000000000000000000000000000000000"), 13) == true);
 	}
 }
+
+namespace {
+void test_rate_limit(aux::session_settings const& sett, std::function<void(lt::dht::socket_manager&)> f)
+{
+	io_context ios;
+	obs observer;
+	counters cnt;
+	auto dht_storage = dht_default_storage_constructor(sett);
+	dht_state s;
+
+	lt::dht::dht_tracker::send_fun_t send;
+
+	dht_tracker dht(&observer, ios, send, sett, cnt, *dht_storage, std::move(s));
+	f(dht);
+}
+}
+
+TORRENT_TEST(rate_limit_int_max)
+{
+	aux::session_settings sett;
+	sett.set_int(settings_pack::dht_upload_rate_limit, std::numeric_limits<int>::max());
+
+	test_rate_limit(sett, [](lt::dht::socket_manager& sm) {
+		TEST_CHECK(sm.has_quota());
+		std::this_thread::sleep_for(milliseconds(10));
+
+		// *any* increment to the quote above INT_MAX may overflow. Ensure it
+		// doesn't
+		TEST_CHECK(sm.has_quota());
+	});
+}
+
+TORRENT_TEST(rate_limit_large_delta)
+{
+	aux::session_settings sett;
+	sett.set_int(settings_pack::dht_upload_rate_limit, std::numeric_limits<int>::max());
+
+	test_rate_limit(sett, [](lt::dht::socket_manager& sm) {
+		TEST_CHECK(sm.has_quota());
+		std::this_thread::sleep_for(milliseconds(2500));
+
+		// even though we have headroom in the limit itself, this long delay
+		// would increment the quota past INT_MAX
+		TEST_CHECK(sm.has_quota());
+	});
+}
+
+TORRENT_TEST(rate_limit_accrue_limit)
+{
+	aux::session_settings sett;
+	sett.set_int(settings_pack::dht_upload_rate_limit, std::numeric_limits<int>::max());
+
+	test_rate_limit(sett, [](lt::dht::socket_manager& sm) {
+		TEST_CHECK(sm.has_quota());
+		for (int i = 0; i < 10; ++i)
+		{
+			std::this_thread::sleep_for(milliseconds(500));
+			TEST_CHECK(sm.has_quota());
+		}
+	});
+}
+
 
 // TODO: test obfuscated_get_peers
 
